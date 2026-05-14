@@ -1,0 +1,22 @@
+=========================================
+SOCKS5 PROXY INFORMATION
+=========================================
+Created: 2026-05-14 14:17:34 UTC
+Expires: 2026-05-14 14:47:34 UTC
+=========================================
+CONNECTION DETAILS:
+=========================================
+SOCKS5 Host: bore.pub
+SOCKS5 Port: 28982
+=========================================
+LIMITATIONS:
+=========================================
+Time Limit: 30 minutes
+No username or password required
+=========================================
+USAGE INSTRUCTIONS:
+=========================================
+- Telegram: Settings > Advanced > Connection Type > SOCKS5
+- Browser: Use SwitchyOmega extension
+- System: Network settings > Proxy > SOCKS5
+=========================================
