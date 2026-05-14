@@ -78,8 +78,8 @@ jobs:
             exit 1
           fi
 
-          # Run danted in foreground mode to capture correct PID
-          sudo danted -f /etc/danted.conf -d > /tmp/danted.log 2>&1 &
+          # Run danted in foreground with single process and debug level 1
+          sudo danted -f /etc/danted.conf -N 1 -d 1 > /tmp/danted.log 2>&1 &
           DANTED_PID=$!
           echo "DANTED_PID=$DANTED_PID" >> $GITHUB_ENV
 
