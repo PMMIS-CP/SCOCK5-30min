@@ -1,0 +1,312 @@
+name: SOCKS5 Proxy - 30 Minutes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  socks5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install SOCKS5 server and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dante-server curl wget net-tools gettext-base psmisc socat
+
+          PORTS=(443 1080 3535 8080 3128 8888 9999 5000 7000 9000 10000)
+          SELECTED_PORT=""
+
+          for PORT in "${PORTS[@]}"; do
+            if ! sudo ss -tuln | grep -q ":${PORT}[[:space:]]"; then
+              SELECTED_PORT=$PORT
+              echo "Selected available port: $SELECTED_PORT"
+              break
+            fi
+          done
+
+          if [ -z "$SELECTED_PORT" ]; then
+            for i in $(seq 1 20); do
+              RANDOM_PORT=$(( (RANDOM % 60000) + 1024 ))
+              if ! sudo ss -tuln | grep -q ":${RANDOM_PORT}[[:space:]]"; then
+                SELECTED_PORT=$RANDOM_PORT
+                echo "Selected random available port: $SELECTED_PORT"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$SELECTED_PORT" ]; then
+            echo "ERROR: No available port found"
+            exit 1
+          fi
+
+          echo "PORT=$SELECTED_PORT" >> $GITHUB_ENV
+
+          ACTIVE_INTERFACE=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+          if [ -z "$ACTIVE_INTERFACE" ]; then
+            # Try common interface names in GitHub Actions
+            for iface in eth0 ens3 enp0s1 docker0; do
+              if ip link show "$iface" &>/dev/null; then
+                ACTIVE_INTERFACE="$iface"
+                break
+              fi
+            done
+          fi
+          if [ -z "$ACTIVE_INTERFACE" ]; then
+            echo "WARNING: No active interface found, using eth0 as fallback"
+            ACTIVE_INTERFACE="eth0"
+          else
+            echo "Detected active interface: $ACTIVE_INTERFACE"
+          fi
+
+          sed "s/SELECTED_PORT/$SELECTED_PORT/g" danted.conf | \
+            sed "s/external: eth0/external: ${ACTIVE_INTERFACE}/g" > /tmp/danted.conf
+
+          echo "Generated danted.conf:"
+          cat /tmp/danted.conf
+
+          sudo cp /tmp/danted.conf /etc/danted.conf
+
+          if [ ! -f /etc/danted.conf ]; then
+            echo "ERROR: Failed to create danted.conf"
+            exit 1
+          fi
+
+          # Run danted in foreground mode to capture correct PID
+          sudo danted -f /etc/danted.conf -d > /tmp/danted.log 2>&1 &
+          DANTED_PID=$!
+          echo "DANTED_PID=$DANTED_PID" >> $GITHUB_ENV
+
+          # Wait for danted to start listening on the selected port (max 10 seconds)
+          for i in {1..10}; do
+            if sudo ss -tuln | grep -q ":${SELECTED_PORT}[[:space:]]"; then
+              echo "Danted started (PID $DANTED_PID) and listening on port $SELECTED_PORT"
+              break
+            fi
+            sleep 1
+          done
+
+          # Verify it's actually running
+          if ! kill -0 "$DANTED_PID" 2>/dev/null; then
+            echo "ERROR: danted process died. Log:"
+            cat /tmp/danted.log
+            exit 1
+          fi
+
+          if ! sudo ss -tuln | grep -q ":${SELECTED_PORT}[[:space:]]"; then
+            echo "ERROR: danted is not listening on port $SELECTED_PORT. Log:"
+            cat /tmp/danted.log
+            exit 1
+          fi
+
+          echo "Danted SOCKS5 server started successfully on port $SELECTED_PORT"
+
+      - name: Create TCP tunnel with bore
+        env:
+          PORT: ${{ env.PORT }}
+        run: |
+          BORE_VERSION="v0.6.0"
+          wget -q -O bore.tar.gz "https://github.com/ekzhang/bore/releases/download/${BORE_VERSION}/bore-${BORE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          if [ ! -f bore.tar.gz ]; then
+            echo "ERROR: Failed to download bore"
+            exit 1
+          fi
+          tar -xzf bore.tar.gz
+          chmod +x bore
+          ./bore local $PORT --to bore.pub > bore.log 2>&1 &
+          BORE_PID=$!
+          echo "BORE_PID=$BORE_PID" >> $GITHUB_ENV
+
+          sleep 8
+
+          PUBLIC_HOST=$(grep -oE 'bore\.pub:[0-9]+' bore.log | head -1)
+          if [ -z "$PUBLIC_HOST" ]; then
+            # Fallback: any host:port pattern if bore changes output
+            PUBLIC_HOST=$(grep -oE '[a-zA-Z0-9.-]+:[0-9]+' bore.log | head -1)
+          fi
+
+          if [ -z "$PUBLIC_HOST" ]; then
+            echo "ERROR: Failed to obtain tunnel address from bore"
+            cat bore.log
+            exit 1
+          fi
+
+          PROXY_HOST=$(echo "$PUBLIC_HOST" | cut -d: -f1)
+          PROXY_PORT=$(echo "$PUBLIC_HOST" | cut -d: -f2)
+
+          echo "PROXY_HOST=$PROXY_HOST" >> $GITHUB_ENV
+          echo "PROXY_PORT=$PROXY_PORT" >> $GITHUB_ENV
+          CURRENT_DATE=$(date -u +"%Y-%m-%d_%H-%M-%S")
+          echo "CURRENT_DATE=$CURRENT_DATE" >> $GITHUB_ENV
+
+          echo "========================================="
+          echo "SOCKS5 PROXY IS READY FOR 30 MINUTES"
+          echo "========================================="
+          echo "Host: $PROXY_HOST"
+          echo "Port: $PROXY_PORT"
+          echo "Time Limit: 30 minutes"
+          echo "========================================="
+
+      - name: Save proxy information to file
+        run: |
+          START_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          END_TIME=$(date -u -d "+30 minutes" +"%Y-%m-%d %H:%M:%S UTC")
+          mkdir -p proxy-info
+          export START_TIME END_TIME PROXY_HOST PROXY_PORT
+          envsubst < proxy-template.txt > proxy-info/${CURRENT_DATE}.txt
+          echo "Proxy information saved to proxy-info/${CURRENT_DATE}.txt"
+        env:
+          CURRENT_DATE: ${{ env.CURRENT_DATE }}
+          PROXY_HOST: ${{ env.PROXY_HOST }}
+          PROXY_PORT: ${{ env.PROXY_PORT }}
+
+      - name: Commit proxy information
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+          if [ ! -f "proxy-info/${CURRENT_DATE}.txt" ]; then
+            echo "ERROR: Proxy info file not found"
+            exit 1
+          fi
+
+          git add proxy-info/${CURRENT_DATE}.txt
+
+          # Only commit if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add proxy information - ${CURRENT_DATE}"
+            COMMIT_EXIT_CODE=$?
+            if [ $COMMIT_EXIT_CODE -ne 0 ]; then
+              echo "ERROR: git commit failed with code $COMMIT_EXIT_CODE"
+              exit 1
+            fi
+
+            # Determine default branch
+            DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | cut -d' ' -f5)
+            if [ -z "$DEFAULT_BRANCH" ]; then
+              if git show-ref --verify --quiet refs/heads/main; then
+                DEFAULT_BRANCH="main"
+              elif git show-ref --verify --quiet refs/heads/master; then
+                DEFAULT_BRANCH="master"
+              else
+                DEFAULT_BRANCH="main"
+              fi
+            fi
+
+            # Push with retries
+            RETRY_COUNT=0
+            MAX_RETRIES=3
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if git push origin HEAD:"$DEFAULT_BRANCH" 2>/tmp/git_push_error.log; then
+                echo "Proxy information committed to repository ($DEFAULT_BRANCH branch)"
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                  echo "Push failed, retrying in 5 seconds... (attempt $RETRY_COUNT/$MAX_RETRIES)"
+                  sleep 5
+                  git pull --rebase origin "$DEFAULT_BRANCH" 2>/dev/null || true
+                else
+                  echo "ERROR: Failed to push after $MAX_RETRIES attempts"
+                  cat /tmp/git_push_error.log
+                  exit 1
+                fi
+              fi
+            done
+          fi
+        env:
+          CURRENT_DATE: ${{ env.CURRENT_DATE }}
+
+      - name: Display connection info
+        run: |
+          echo ""
+          echo "========================================="
+          echo "COPY THIS ADDRESS TO YOUR CLIENT:"
+          echo "========================================="
+          echo ""
+          echo "SOCKS5 Host: $PROXY_HOST"
+          echo "SOCKS5 Port: $PROXY_PORT"
+          echo ""
+          echo "No username or password required"
+          echo "========================================="
+          echo ""
+          echo "Configuration for common apps:"
+          echo "- Telegram: Settings > Advanced > Connection Type > SOCKS5"
+          echo "- Browser: Use SwitchyOmega extension"
+          echo "- System: Network settings > Proxy > SOCKS5"
+          echo ""
+          echo "Proxy info saved to: proxy-info/${CURRENT_DATE}.txt"
+          echo ""
+        env:
+          PROXY_HOST: ${{ env.PROXY_HOST }}
+          PROXY_PORT: ${{ env.PROXY_PORT }}
+          CURRENT_DATE: ${{ env.CURRENT_DATE }}
+
+      - name: Keep proxy alive for 30 minutes
+        run: |
+          echo "========================================="
+          echo "PROXY RUNNING - COUNTDOWN STARTED"
+          echo "========================================="
+          echo "SOCKS5: ${PROXY_HOST}:${PROXY_PORT}"
+          echo "Start time: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "End time: $(date -u -d "+30 minutes" +"%Y-%m-%d %H:%M:%S UTC")"
+          echo ""
+          echo "The proxy will automatically shut down after 30 minutes."
+          echo "========================================="
+
+          sleep 1800
+
+          echo ""
+          echo "========================================="
+          echo "30 MINUTES COMPLETED"
+          echo "========================================="
+          echo "End time: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "Shutting down proxy services..."
+        env:
+          PROXY_HOST: ${{ env.PROXY_HOST }}
+          PROXY_PORT: ${{ env.PROXY_PORT }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Starting cleanup..."
+
+          if [ -n "$DANTED_PID" ] && kill -0 "$DANTED_PID" 2>/dev/null; then
+            sudo kill -TERM "$DANTED_PID" 2>/dev/null || true
+            sleep 2
+            sudo kill -KILL "$DANTED_PID" 2>/dev/null || true
+            echo "Danted process (PID: $DANTED_PID) terminated"
+          fi
+
+          if pgrep -x "danted" > /dev/null; then
+            sudo pkill -x "danted"
+            echo "Remaining danted processes terminated"
+          fi
+
+          if [ -n "$BORE_PID" ] && kill -0 "$BORE_PID" 2>/dev/null; then
+            kill -TERM "$BORE_PID" 2>/dev/null || true
+            sleep 2
+            kill -KILL "$BORE_PID" 2>/dev/null || true
+            echo "Bore process (PID: $BORE_PID) terminated"
+          fi
+
+          if pgrep -f "bore" > /dev/null; then
+            pkill -f "bore"
+            echo "Remaining bore processes terminated"
+          fi
+
+          rm -f bore bore.log /tmp/danted.conf
+          echo "Cleanup complete. Proxy is offline."
+          echo "Run this workflow again whenever you need a new proxy."
+          rm -f bore.tar.gz
+        env:
+          DANTED_PID: ${{ env.DANTED_PID }}
+          BORE_PID: ${{ env.BORE_PID }}

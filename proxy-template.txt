@@ -1,0 +1,22 @@
+=========================================
+SOCKS5 PROXY INFORMATION
+=========================================
+Created: ${START_TIME}
+Expires: ${END_TIME}
+=========================================
+CONNECTION DETAILS:
+=========================================
+SOCKS5 Host: ${PROXY_HOST}
+SOCKS5 Port: ${PROXY_PORT}
+=========================================
+LIMITATIONS:
+=========================================
+Time Limit: 30 minutes
+No username or password required
+=========================================
+USAGE INSTRUCTIONS:
+=========================================
+- Telegram: Settings > Advanced > Connection Type > SOCKS5
+- Browser: Use SwitchyOmega extension
+- System: Network settings > Proxy > SOCKS5
+=========================================
